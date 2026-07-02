@@ -14,7 +14,7 @@ use tray_icon::{TrayIcon, TrayIconBuilder};
 
 use metrics::{bar, Metric, MetricSource};
 
-const REFRESH_INTERVAL: Duration = Duration::from_secs(60);
+const REFRESH_INTERVAL: Duration = Duration::from_secs(300);
 
 /// Register metric sources here. Order determines menu order.
 fn sources() -> Vec<Box<dyn MetricSource>> {
