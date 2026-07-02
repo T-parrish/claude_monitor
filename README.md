@@ -29,7 +29,8 @@ with the token Claude Code already stores in the macOS Keychain (read via
 the `security` CLI). There is nothing to configure: as long as you're logged
 in to Claude Code, the widget works, and Claude Code keeps the token fresh.
 
-Metrics refresh automatically every 300 seconds (configurable via
+
+Metrics refresh automatically every 60 seconds (configurable via
 `REFRESH_INTERVAL` in `src/main.rs`). If a fetch fails — offline, logged
 out — the title shows `⚠ Claude` and the dropdown shows the error; it keeps
 retrying and recovers on its own.
