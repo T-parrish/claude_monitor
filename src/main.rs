@@ -12,7 +12,7 @@ use tao::event_loop::{ControlFlow, EventLoopBuilder};
 use tray_icon::menu::{Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem};
 use tray_icon::{TrayIcon, TrayIconBuilder};
 
-use metrics::{bar, Metric, MetricSource};
+use metrics::{bar, FetchError, Metric, MetricSource};
 
 const REFRESH_INTERVAL: Duration = Duration::from_secs(60);
 
@@ -21,7 +21,7 @@ fn sources() -> Vec<Box<dyn MetricSource>> {
     vec![Box::new(sources::plan_usage::PlanUsage)]
 }
 
-type SourceResult = (String, Result<Vec<Metric>, String>);
+type SourceResult = (String, Result<Vec<Metric>, FetchError>);
 
 enum AppEvent {
     Update(Vec<SourceResult>),
@@ -78,13 +78,20 @@ fn main() {
                 );
             }
             Event::UserEvent(AppEvent::Update(results)) => {
+                // A rate-limited fetch means the data is stale, not wrong:
+                // keep the previous title/menu instead of flashing an error.
+                let rate_limited = results
+                    .iter()
+                    .any(|(_, r)| matches!(r, Err(FetchError::RateLimited)));
                 if let Some(tray) = &tray {
-                    tray.set_title(Some(title_for(&results)));
-                    tray.set_menu(Some(Box::new(build_menu(
-                        &results,
-                        &refresh_id,
-                        &quit_id,
-                    ))));
+                    if !rate_limited {
+                        tray.set_title(Some(title_for(&results)));
+                        tray.set_menu(Some(Box::new(build_menu(
+                            &results,
+                            &refresh_id,
+                            &quit_id,
+                        ))));
+                    }
                 }
             }
             Event::UserEvent(AppEvent::Menu(e)) => {

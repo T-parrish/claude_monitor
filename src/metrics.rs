@@ -11,13 +11,30 @@ pub struct Metric {
     pub emphasized: bool,
 }
 
+/// Why a fetch produced no metrics. Rate limiting is separate from real
+/// failures so the UI can keep the last good reading instead of showing ⚠.
+pub enum FetchError {
+    /// 429 that persisted through retries — data is stale, not wrong.
+    RateLimited,
+    Failed(String),
+}
+
+impl std::fmt::Display for FetchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FetchError::RateLimited => write!(f, "rate limited by API"),
+            FetchError::Failed(msg) => write!(f, "{msg}"),
+        }
+    }
+}
+
 /// Anything that can produce metrics: plan usage today, local token counts,
 /// API spend, CI status, ... Add a new source by implementing this trait and
 /// registering it in `main::sources()`.
 pub trait MetricSource: Send {
     /// Section heading shown in the dropdown menu.
     fn name(&self) -> &str;
-    fn fetch(&self) -> Result<Vec<Metric>, String>;
+    fn fetch(&self) -> Result<Vec<Metric>, FetchError>;
 }
 
 /// Render a text progress bar, e.g. `▰▰▰▱▱▱▱▱▱▱` for 30%.

@@ -1,11 +1,16 @@
 use chrono::{DateTime, Local};
 use serde_json::Value;
 use std::process::Command;
+use std::time::Duration;
 
-use crate::metrics::{Metric, MetricSource};
+use crate::metrics::{FetchError, Metric, MetricSource};
 
 const USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
 const KEYCHAIN_SERVICE: &str = "Claude Code-credentials";
+
+/// Backoff before each 429 retry. Kept well under the 300s poll interval so
+/// a rate-limited fetch resolves before the next scheduled poll piles on.
+const RETRY_DELAYS_SECS: [u64; 3] = [15, 30, 60];
 
 /// Claude subscription plan usage, read from the same OAuth endpoint that
 /// Claude Code's `/usage` command uses. Auth comes from the Claude Code
@@ -18,24 +23,15 @@ impl MetricSource for PlanUsage {
         "Claude Plan Usage"
     }
 
-    fn fetch(&self) -> Result<Vec<Metric>, String> {
-        let token = access_token()?;
-        let body: Value = ureq::get(USAGE_URL)
-            .set("Authorization", &format!("Bearer {token}"))
-            .set("anthropic-beta", "oauth-2025-04-20")
-            .call()
-            .map_err(|e| match e {
-                ureq::Error::Status(401, _) => {
-                    "token rejected — run `claude` once to refresh login".to_string()
-                }
-                other => format!("usage request failed: {other}"),
-            })?
+    fn fetch(&self) -> Result<Vec<Metric>, FetchError> {
+        let token = access_token().map_err(FetchError::Failed)?;
+        let body: Value = request_usage(&token)?
             .into_json()
-            .map_err(|e| format!("bad response: {e}"))?;
+            .map_err(|e| FetchError::Failed(format!("bad response: {e}")))?;
 
         let limits = body["limits"]
             .as_array()
-            .ok_or("no `limits` array in usage response")?;
+            .ok_or_else(|| FetchError::Failed("no `limits` array in usage response".into()))?;
 
         let mut metrics: Vec<Metric> = limits
             .iter()
@@ -55,7 +51,7 @@ impl MetricSource for PlanUsage {
             .collect();
 
         if metrics.is_empty() {
-            return Err("usage response contained no limits".into());
+            return Err(FetchError::Failed("usage response contained no limits".into()));
         }
         // If the API ever stops reporting a session limit, emphasize the
         // highest metric so the title still shows something meaningful.
@@ -68,6 +64,40 @@ impl MetricSource for PlanUsage {
             }
         }
         Ok(metrics)
+    }
+}
+
+/// GET the usage endpoint, retrying 429s with exponential backoff (honoring
+/// a `Retry-After` header when present). Runs on the background fetcher
+/// thread, so sleeping here never blocks the UI.
+fn request_usage(token: &str) -> Result<ureq::Response, FetchError> {
+    let mut delays = RETRY_DELAYS_SECS.iter();
+    loop {
+        match ureq::get(USAGE_URL)
+            .set("Authorization", &format!("Bearer {token}"))
+            .set("anthropic-beta", "oauth-2025-04-20")
+            .call()
+        {
+            Ok(resp) => return Ok(resp),
+            Err(ureq::Error::Status(429, resp)) => match delays.next() {
+                Some(&backoff) => {
+                    let secs = resp
+                        .header("retry-after")
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(backoff);
+                    std::thread::sleep(Duration::from_secs(secs));
+                }
+                None => return Err(FetchError::RateLimited),
+            },
+            Err(ureq::Error::Status(401, _)) => {
+                return Err(FetchError::Failed(
+                    "token rejected — run `claude` once to refresh login".to_string(),
+                ))
+            }
+            Err(other) => {
+                return Err(FetchError::Failed(format!("usage request failed: {other}")))
+            }
+        }
     }
 }
 
