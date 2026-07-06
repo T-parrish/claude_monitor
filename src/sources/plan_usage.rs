@@ -8,9 +8,18 @@ use crate::metrics::{FetchError, Metric, MetricSource};
 const USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
 const KEYCHAIN_SERVICE: &str = "Claude Code-credentials";
 
-/// Backoff before each 429 retry. Kept well under the 300s poll interval so
-/// a rate-limited fetch resolves before the next scheduled poll piles on.
+/// Backoff before each 429 retry, kept short so a rate-limited fetch
+/// resolves near the next scheduled poll instead of piling up.
 const RETRY_DELAYS_SECS: [u64; 3] = [15, 30, 60];
+
+/// Longest we'll ever sleep honoring a `Retry-After` header. The fetch
+/// thread is the only thing updating the menu, so an uncapped server value
+/// (they can be hours) would freeze the UI on stale data.
+const MAX_RETRY_SLEEP_SECS: u64 = 60;
+
+/// Overall per-request timeout so a dead socket (e.g. after laptop sleep)
+/// can't block the fetch thread indefinitely.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Claude subscription plan usage, read from the same OAuth endpoint that
 /// Claude Code's `/usage` command uses. Auth comes from the Claude Code
@@ -76,6 +85,7 @@ fn request_usage(token: &str) -> Result<ureq::Response, FetchError> {
         match ureq::get(USAGE_URL)
             .set("Authorization", &format!("Bearer {token}"))
             .set("anthropic-beta", "oauth-2025-04-20")
+            .timeout(REQUEST_TIMEOUT)
             .call()
         {
             Ok(resp) => return Ok(resp),
@@ -85,6 +95,11 @@ fn request_usage(token: &str) -> Result<ureq::Response, FetchError> {
                         .header("retry-after")
                         .and_then(|v| v.parse().ok())
                         .unwrap_or(backoff);
+                    if secs > MAX_RETRY_SLEEP_SECS {
+                        // Too long to wait in-line; report stale and let the
+                        // next scheduled poll try again.
+                        return Err(FetchError::RateLimited);
+                    }
                     std::thread::sleep(Duration::from_secs(secs));
                 }
                 None => return Err(FetchError::RateLimited),
